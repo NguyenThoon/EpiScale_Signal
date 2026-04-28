@@ -21,4 +21,4 @@ module load extra
 module load openmpi/4.1.2_slurm-21.08.5
 
 ./build_EpiScale_Signal.sh build
-./bin/runDiscSimulation_M
+./bin/runDiscSimulation_M -slurm TN
