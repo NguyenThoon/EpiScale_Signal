@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=60G
+#SBATCH --mem=64G
 #SBATCH --time=0-2:00:00
 #SBATCH --mail-type=ALL
 #SBATCH --job-name="TN_Job"

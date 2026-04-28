@@ -1405,7 +1405,7 @@ void SceCells::runAllCellLogicsDisc_M(double dt, double Damp_Coef, double InitTi
 	std::cout.flush();
 //Ali        
 	computeCenterPos_M();
-    exchSignal();
+    //exchSignal();
     BC_Imp_M() ; 
 	std::cout << "     *** 3.5 ***" << endl;
 	std::cout.flush();
