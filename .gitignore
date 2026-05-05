@@ -13,4 +13,8 @@ tst/googletest/
 !License.txt
 !Doxyfile.in
 !.gitignore
+!resources/disc_TN.cfg
 
+# Simulation run outputs
+runs/
+resources/disc_TN_*.cfg
