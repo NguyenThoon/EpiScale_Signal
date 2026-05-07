@@ -783,7 +783,7 @@ struct ApplySurfaceAdhesionForce_Ridges_Functor:
 
 				if (randBind < _siteBindThreshold) {
 
-					double meanAdhLen = 4.0 / 15.0;
+					double meanAdhLen = 3 / 15.0;
 					double stdAdhLen = meanAdhLen / 4.0;  // TN: temporary choice
 
 					thrust::normal_distribution<double> normalDist(meanAdhLen, stdAdhLen);

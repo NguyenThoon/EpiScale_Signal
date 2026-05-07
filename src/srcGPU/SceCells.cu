@@ -728,6 +728,15 @@ void SceCells::initCellInfoVecs_M() {
 	cellInfoVecs.cellAreaVec.resize(allocPara_m.maxCellCount, 0.0);
         cellInfoVecs.cellPerimVec.resize(allocPara_m.maxCellCount, 0.0);//AAMIRI
         std::cout << "finished " << std::endl;
+
+	// TN: substrate adhesion sites for membrane nodes
+	uint maxSubSitePerNode = 5;
+	uint maxSubAdhSiteCount = allocPara_m.maxTotalNodeCount * maxSubSitePerNode;
+
+	cellInfoVecs.subAdhIsBoundMembr.resize(maxSubAdhSiteCount, 0);
+	cellInfoVecs.subAdhLocMembrX.resize(maxSubAdhSiteCount, 0.0);
+	cellInfoVecs.subAdhLocMembrY.resize(maxSubAdhSiteCount, 0.0);
+	cellInfoVecs.subAdhLocMembrZ.resize(maxSubAdhSiteCount, 0.0);
 }
 
 void SceCells::initCellNodeInfoVecs() {
@@ -1417,9 +1426,9 @@ void SceCells::runAllCellLogicsDisc_M(double dt, double Damp_Coef, double InitTi
 	applyMemForce_M();
 	std::cout << "     *** 4 ***" << endl;
 	std::cout.flush();
+	//TNGUY
+	ApplySurfaceAdhesionForce_Ridges();
 
-     //Ali cmment //
-//	computeCenterPos_M();
 	std::cout << "     *** 5 ***" << endl;
 	std::cout.flush();
      //Ali cmment //
@@ -2345,6 +2354,131 @@ void SceCells::applyMemForce_M() {
 					bendLeftYAddr, bendRightXAddr, bendRightYAddr));
 }
 
+//TNGUY
+void SceCells::ApplySurfaceAdhesionForce_Ridges() {
+
+	totalNodeCountForActiveCells = allocPara_m.currentActiveCellCount
+			* allocPara_m.maxAllNodePerCell;
+
+	uint maxAllNodePerCell = allocPara_m.maxAllNodePerCell;
+
+	thrust::counting_iterator<uint> iBegin(0);
+
+	int* subAdhIsBoundAddr = thrust::raw_pointer_cast(
+			&(cellInfoVecs.subAdhIsBoundMembr[0]));
+
+	double* subAdhLocXAddr = thrust::raw_pointer_cast(
+			&(cellInfoVecs.subAdhLocMembrX[0]));
+
+	double* subAdhLocYAddr = thrust::raw_pointer_cast(
+			&(cellInfoVecs.subAdhLocMembrY[0]));
+
+	double* subAdhLocZAddr = thrust::raw_pointer_cast(
+			&(cellInfoVecs.subAdhLocMembrZ[0]));
+
+	// TN: temporary constants. Move these to config later.
+	uint maxSubSitePerNode = 5;
+
+	double siteBindThreshold = 0.05;
+	double charUnbindDist = 0.5;
+	double lambda = 1.0;
+	double kAdh = 1.0;
+
+	// Direction of new adhesion formation.
+	// For now this matches the MATLAB sample's fixed Direction.
+	double direction = 0.0;
+
+	// Ridge pattern parameters.
+	double ridgeXMin = -1000;
+	double ridgeAdhWidth = 1.0/15.0;
+	double ridgeNonAdhWidth = 1.0/15.0;
+
+	// Change seed with time step so adhesion events are not identical every step.
+	uint seed = static_cast<uint>(curTime / dt) + 1;
+
+	thrust::transform(
+			thrust::make_zip_iterator(
+					thrust::make_tuple(
+							thrust::make_permutation_iterator(
+									cellInfoVecs.activeMembrNodeCounts.begin(),
+									make_transform_iterator(iBegin,
+											DivideFunctor(maxAllNodePerCell))),
+
+							make_transform_iterator(iBegin,
+									DivideFunctor(maxAllNodePerCell)),
+
+							make_transform_iterator(iBegin,
+									ModuloFunctor(maxAllNodePerCell)),
+
+							nodes->getInfoVecs().nodeLocX.begin()
+									+ allocPara_m.bdryNodeCount,
+
+							nodes->getInfoVecs().nodeLocY.begin()
+									+ allocPara_m.bdryNodeCount,
+
+							nodes->getInfoVecs().nodeVelX.begin()
+									+ allocPara_m.bdryNodeCount,
+
+							nodes->getInfoVecs().nodeVelY.begin()
+									+ allocPara_m.bdryNodeCount,
+
+							nodes->getInfoVecs().nodeIsActive.begin()
+									+ allocPara_m.bdryNodeCount)),
+
+			thrust::make_zip_iterator(
+					thrust::make_tuple(
+							thrust::make_permutation_iterator(
+									cellInfoVecs.activeMembrNodeCounts.begin(),
+									make_transform_iterator(iBegin,
+											DivideFunctor(maxAllNodePerCell))),
+
+							make_transform_iterator(iBegin,
+									DivideFunctor(maxAllNodePerCell)),
+
+							make_transform_iterator(iBegin,
+									ModuloFunctor(maxAllNodePerCell)),
+
+							nodes->getInfoVecs().nodeLocX.begin()
+									+ allocPara_m.bdryNodeCount,
+
+							nodes->getInfoVecs().nodeLocY.begin()
+									+ allocPara_m.bdryNodeCount,
+
+							nodes->getInfoVecs().nodeVelX.begin()
+									+ allocPara_m.bdryNodeCount,
+
+							nodes->getInfoVecs().nodeVelY.begin()
+									+ allocPara_m.bdryNodeCount,
+
+							nodes->getInfoVecs().nodeIsActive.begin()
+									+ allocPara_m.bdryNodeCount))
+					+ totalNodeCountForActiveCells,
+
+			thrust::make_zip_iterator(
+					thrust::make_tuple(
+							nodes->getInfoVecs().nodeVelX.begin()
+									+ allocPara_m.bdryNodeCount,
+							nodes->getInfoVecs().nodeVelY.begin()
+									+ allocPara_m.bdryNodeCount)),
+
+			ApplySurfaceAdhesionForce_Ridges_Functor(
+					subAdhIsBoundAddr,
+					subAdhLocXAddr,
+					subAdhLocYAddr,
+					subAdhLocZAddr,
+					allocPara_m.bdryNodeCount,
+					maxAllNodePerCell,
+					maxSubSitePerNode,
+					siteBindThreshold,
+					charUnbindDist,
+					lambda,
+					kAdh,
+					direction,
+					ridgeXMin,
+					ridgeAdhWidth,
+					ridgeNonAdhWidth,
+					seed));
+}
 
 //AAMIRI
 
