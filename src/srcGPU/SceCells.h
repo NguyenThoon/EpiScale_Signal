@@ -27,6 +27,9 @@ typedef thrust::tuple<uint, uint, uint, uint, double, double, double> CellData;
 //typedef pair<device_vector<double>::iterator,device_vector<double>::iterator> MinMaxNode ; 
 // maxMemThres, cellRank, nodeRank , locX, locY, velX, velY
 
+typedef thrust::tuple<uint, uint, uint, double, double, double, double, bool> SurfaceAdhData;
+// TNGUY: activeMembrCount, cellRank, nodeRank, locX, locY, velX, velY, isActive
+
 /*
  __device__
  SceNodeType indxToType(uint& indx);
@@ -105,6 +108,26 @@ void calAndAddII_M(double& xPos, double& yPos, double& xPos2, double& yPos2,
 
 __device__
 double compDist2D(double &xPos, double &yPos, double &xPos2, double &yPos2);
+
+// TNGUY Adhesion Logic
+__device__
+bool isAdhesiveSurfaceRidge(double x, double y, double xMin,
+		double adhesiveWidth, double nonAdhesiveWidth) {
+	double period = adhesiveWidth + nonAdhesiveWidth;
+
+	if (period <= 0.0 || adhesivewidth <= 0.0) {
+		return false;
+	}
+
+	double relX = x - xMin;
+	double posInPeriod = fmod(relX, period);
+
+	if (posInPeriod < 0.0) {
+        posInPeriod += period;
+    }
+
+    return posInPeriod < adhesiveWidth;
+}
 
 /**
  * Functor for divide operation.
@@ -632,7 +655,193 @@ struct AddMembrForce: public thrust::unary_function<TensionData, CVec10> {
 		}
 	}
 }; 
+//TNGUY
+struct ApplySurfaceAdhesionForce_Ridges_Functor:
+		public thrust::unary_function<SurfaceAdhData, CVec2> {
 
+	int* _subAdhIsBoundAddr;
+	double* _subAdhLocXAddr;
+	double* _subAdhLocYAddr;
+	double* _subAdhLocZAddr;
+
+	uint _bdryCount;
+	uint _maxAllNodePerCell;
+	uint _maxSubSitePerNode;
+
+	double _siteBindThreshold;
+	double _charUnbindDist;
+	double _lambda;
+	double _kAdh;
+	double _direction;
+
+	double _ridgeXMin;
+	double _ridgeAdhWidth;
+	double _ridgeNonAdhWidth;
+
+	uint _seed;
+
+	__host__ __device__
+	ApplySurfaceAdhesionForce_Ridges_Functor(
+			int* subAdhIsBoundAddr,
+			double* subAdhLocXAddr,
+			double* subAdhLocYAddr,
+			double* subAdhLocZAddr,
+			uint bdryCount,
+			uint maxAllNodePerCell,
+			uint maxSubSitePerNode,
+			double siteBindThreshold,
+			double charUnbindDist,
+			double lambda,
+			double kAdh,
+			double direction,
+			double ridgeXMin,
+			double ridgeAdhWidth,
+			double ridgeNonAdhWidth,
+			uint seed) :
+			_subAdhIsBoundAddr(subAdhIsBoundAddr),
+			_subAdhLocXAddr(subAdhLocXAddr),
+			_subAdhLocYAddr(subAdhLocYAddr),
+			_subAdhLocZAddr(subAdhLocZAddr),
+			_bdryCount(bdryCount),
+			_maxAllNodePerCell(maxAllNodePerCell),
+			_maxSubSitePerNode(maxSubSitePerNode),
+			_siteBindThreshold(siteBindThreshold),
+			_charUnbindDist(charUnbindDist),
+			_lambda(lambda),
+			_kAdh(kAdh),
+			_direction(direction),
+			_ridgeXMin(ridgeXMin),
+			_ridgeAdhWidth(ridgeAdhWidth),
+			_ridgeNonAdhWidth(ridgeNonAdhWidth),
+			_seed(seed) {
+	}
+
+	__device__
+	CVec2 operator()(const SurfaceAdhData& data) const {
+
+		uint activeMembrCount = thrust::get<0>(data);
+		uint cellRank = thrust::get<1>(data);
+		uint nodeRank = thrust::get<2>(data);
+
+		double x0 = thrust::get<3>(data);
+		double y0 = thrust::get<4>(data);
+		double velX = thrust::get<5>(data);
+		double velY = thrust::get<6>(data);
+
+		bool isActive = thrust::get<7>(data);
+
+		// Only apply substrate adhesion to active membrane nodes.
+		if (!isActive || nodeRank >= activeMembrCount) {
+			return thrust::make_tuple(velX, velY);
+		}
+
+		uint nodeGlobalIndex = _bdryCount + cellRank * _maxAllNodePerCell + nodeRank;
+
+		uint siteBegin = nodeGlobalIndex * _maxSubSitePerNode;
+		uint siteEnd = siteBegin + _maxSubSitePerNode;
+
+		uint bindSiteCount = 0;
+
+		// ------------------------------------------------------------
+		// 1. Check existing adhesion sites and unbind if stretched.
+		// ------------------------------------------------------------
+		for (uint i = siteBegin; i < siteEnd; i++) {
+			if (_subAdhIsBoundAddr[i] == 1) {
+				double dx = x0 - _subAdhLocXAddr[i];
+				double dy = y0 - _subAdhLocYAddr[i];
+				double distNodeSite = sqrt(dx * dx + dy * dy);
+
+				thrust::default_random_engine rng(_seed);
+				rng.discard(i + 17 * nodeGlobalIndex);
+				thrust::uniform_real_distribution<double> dist01(0.0, 1.0);
+				double randVal = dist01(rng);
+
+				double unbindProb = 1.0 - exp(-distNodeSite / _charUnbindDist);
+
+				if (randVal < unbindProb) {
+					_subAdhIsBoundAddr[i] = 0;
+				} else {
+					bindSiteCount++;
+				}
+			}
+		}
+
+		// ------------------------------------------------------------
+		// 2. Try forming new adhesion sites if slots are available.
+		// ------------------------------------------------------------
+		if (bindSiteCount < _maxSubSitePerNode) {
+
+			uint openSlots = _maxSubSitePerNode - bindSiteCount;
+
+			for (uint attempt = 0; attempt < openSlots; attempt++) {
+
+				thrust::default_random_engine rng(_seed);
+				rng.discard(nodeGlobalIndex * _maxSubSitePerNode + attempt + 101);
+				thrust::uniform_real_distribution<double> dist01(0.0, 1.0);
+
+				double randBind = dist01(rng);
+
+				if (randBind < _siteBindThreshold) {
+
+					double meanAdhLen = 1.0 / 15.0;
+					double stdAdhLen = meanAdhLen / 4.0;  // TN: temporary choice
+
+					thrust::normal_distribution<double> normalDist(meanAdhLen, stdAdhLen);
+
+					double randLen = normalDist(rng);
+
+					if (randLen < 0.0) {
+						randLen = 0.0;
+					}
+
+					double x1 = x0 + randLen * cos(_direction);
+					double y1 = y0 + randLen * sin(_direction);
+					double z1 = 0.0;
+
+					// Only allow binding if the proposed adhesion site lies on an adhesive ridge.
+					if (isAdhesiveSurfaceRidge(x1, y1, _ridgeXMin,
+							_ridgeAdhWidth, _ridgeNonAdhWidth)) {
+
+						for (uint i = siteBegin; i < siteEnd; i++) {
+							if (_subAdhIsBoundAddr[i] == 0) {
+								_subAdhLocXAddr[i] = x1;
+								_subAdhLocYAddr[i] = y1;
+								_subAdhLocZAddr[i] = z1;
+								_subAdhIsBoundAddr[i] = 1;
+								bindSiteCount++;
+								break;
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// ------------------------------------------------------------
+		// 3. Add spring-like substrate adhesion force.
+		// ------------------------------------------------------------
+		double fAdhX = 0.0;
+		double fAdhY = 0.0;
+
+		for (uint i = siteBegin; i < siteEnd; i++) {
+			if (_subAdhIsBoundAddr[i] == 1) {
+				double dx = _subAdhLocXAddr[i] - x0;
+				double dy = _subAdhLocYAddr[i] - y0;
+				double distNodeSite = sqrt(dx * dx + dy * dy);
+
+				if (distNodeSite > 0.0) {
+					fAdhX = fAdhX + _kAdh * dx;
+					fAdhY = fAdhY + _kAdh * dy;
+				}
+			}
+		}
+
+		velX = velX + fAdhX;
+		velY = velY + fAdhY;
+
+		return thrust::make_tuple(velX, velY);
+	}
+};
 
 //AAMIRI
 
@@ -2277,6 +2486,12 @@ struct CellInfoVecs {
         thrust::device_vector<double> cell_pMadOld;//Alireza
 
 	thrust::device_vector<double> growthProgressOld;  //A&A
+
+	// TNGUY: substrate adhesion sites for membrane nodes
+	thrust::device_vector<int> subAdhIsBoundMembr;
+	thrust::device_vector<double> subAdhLocMembrX;
+	thrust::device_vector<double> subAdhLocMembrY;
+	thrust::device_vector<double> subAdhLocMembrZ;
 //Ali
         
 //Ali
@@ -2692,6 +2907,9 @@ class SceCells {
 
 	void applySceCellDisc_M();
 
+	//TNGUY
+	void ApplySurfaceAdhesionForce_Ridges();
+		
 	void computeCenterPos_M();
 
 	void growAtRandom_M(double dt);
